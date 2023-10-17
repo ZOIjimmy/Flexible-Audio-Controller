@@ -3,40 +3,87 @@ import multiprocessing
 import numpy as np
 import librosa
 import pyaudio
+import soundfile
 
 ARRAY_SIZE = int(1e10)
 MAX_ITER = 1000
-MAX_PROCECCOR = 4
+MAX_PROCESSOR = 4
 chunk_size = 128
 
-def process(stft, steps, i, dtype):
-    padding = [(0, 0) for _ in stft.shape]
-    padding[-1] = (0, 2)
-    stft2 = np.pad(stft, padding, "constant")
+def __overlap_add(y, ytmp, hop_length):
+    n_fft = ytmp.shape[-2]
+    N = n_fft
+    for frame in range(ytmp.shape[-1]):
+        sample = frame * hop_length
+        # if N > y.shape[-1] - sample:
+            # N = y.shape[-1] - sample
+        y[..., sample : (sample + N)] += ytmp[..., :N, frame]
 
-    shape = list(stft.shape)
-    shape[-1] = len(steps)
-    stft_stretch = np.zeros_like(stft, shape=shape)
-    phase = np.angle(stft[..., 0]) # TODO
+# edited from librosa istft
+def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_length = None, n_fft = None, window = "hann") -> np.ndarray:
+    if n_fft is None:
+        n_fft = 2 * (stft_matrix.shape[-2] - 1)
+    if win_length is None:
+        win_length = n_fft
+    if hop_length is None:
+        hop_length = int(win_length // 4)
 
-    for t, step in enumerate(steps):
-        left = stft2[..., int(step)]
-        right = stft2[..., int(step)+1]
-        frac = np.mod(step, 1.0)
-        mag = (1 - frac) * np.abs(left) + frac * np.abs(right)
-        stft_stretch[..., t] = (np.cos(phase) + 1j * np.sin(phase)) * mag
-        phase += np.angle(right) - np.angle(left)
+    ifft_window = librosa.filters.get_window(window, win_length, fftbins=True)
+    ifft_window = librosa.util.pad_center(ifft_window, size=n_fft)
+    ifft_window = librosa.util.expand_to(ifft_window, ndim=stft_matrix.ndim, axes=-2)
 
-    y_stretch = librosa.istft(stft_stretch, dtype=dtype)
-    y_stretch = y_stretch.reshape(-1, 1, order='F').ravel()
+    n_frames = stft_matrix.shape[-1]
+    dtype = librosa.util.dtype_c2r(stft_matrix.dtype)
+
+    shape = list(stft_matrix.shape[:-2])
+    expected_signal_len = n_fft + hop_length * (n_frames - 1)
+    shape.append(expected_signal_len)
+    expected_signal_len -= 2 * (n_fft // 2)
+
+    y = np.zeros(shape, dtype=dtype)
+    fft = librosa.get_fftlib()
+    start_frame = int(np.ceil((n_fft // 2) / hop_length))
+    ytmp = ifft_window * fft.irfft(stft_matrix[..., :start_frame], n=n_fft, axis=-2)
+
+    shape[-1] = n_fft + hop_length * (start_frame - 1)
+    head_buffer = np.zeros(shape, dtype=dtype)
+    if len(remain) > 0:
+        head_buffer[:,:remain.shape[-1]] = remain[:,:]
+
+    __overlap_add(head_buffer, ytmp, hop_length)
+
+    if y.shape[-1] < shape[-1] - n_fft // 2:
+        y[..., :] = head_buffer[..., n_fft // 2 : y.shape[-1] + n_fft // 2]
+    else:
+        y[..., : shape[-1] - n_fft // 2] = head_buffer[..., n_fft // 2 :]
+
+    offset = start_frame * hop_length - n_fft // 2
+    n_columns = int(librosa.util.MAX_MEM_BLOCK // (np.prod(stft_matrix.shape[:-1]) * stft_matrix.itemsize))
+    n_columns = max(n_columns, 1)
+
+    frame = 0
+    for bl_s in range(start_frame, n_frames, n_columns):
+        bl_t = min(bl_s + n_columns, n_frames)
+        ytmp = ifft_window * fft.irfft(stft_matrix[..., bl_s:bl_t], n=n_fft, axis=-2)
+        __overlap_add(y[..., frame * hop_length + offset :], ytmp, hop_length)
+        frame += bl_t - bl_s
+
+    ifft_window_sum = librosa.filters.window_sumsquare(window=window,n_frames=n_frames,win_length=win_length,n_fft=n_fft,hop_length=hop_length,dtype=dtype)
+    start = n_fft // 2
+    ifft_window_sum = librosa.util.fix_length(ifft_window_sum[..., start:], size=y.shape[-1])
+    approx_nonzero_indices = ifft_window_sum > librosa.util.tiny(ifft_window_sum)
+    y[..., approx_nonzero_indices] /= ifft_window_sum[approx_nonzero_indices]
+
+    return y, expected_signal_len
+
+def process(stft_stretch, i):
+    y_stretch = stft_stretch.reshape(-1, 1, order='F').ravel()
     shm = multiprocessing.shared_memory.SharedMemory(name="buffer")
     dst = np.ndarray(shape=(ARRAY_SIZE,), dtype=np.float32, buffer=shm.buf)
     dst[i*chunk_size*1024:i*chunk_size*1024+y_stretch.shape[0]] = y_stretch[:]
-    # print(y_stretch.shape[0], i)
     return y_stretch.shape[0]
 
-
-def speed_modify(filename, formula):
+def speed_modify(filename, formula="x", mode="play"):
     waveform, sr = librosa.load(filename, sr=None, mono=False)
     stft = librosa.stft(waveform)
     channels, _, stft_len = stft.shape
@@ -44,8 +91,16 @@ def speed_modify(filename, formula):
     d_size = np.dtype(np.float32).itemsize * np.prod((ARRAY_SIZE,))
     shm = multiprocessing.shared_memory.SharedMemory(create=True, size=d_size, name="buffer")
     dst = np.ndarray((ARRAY_SIZE,), dtype=np.float32, buffer=shm.buf)
-    pool = multiprocessing.Pool(processes=MAX_PROCECCOR)
+    pool = multiprocessing.Pool(processes=MAX_PROCESSOR)
+    p = pyaudio.PyAudio()
+    stream = p.open(format=pyaudio.paFloat32, channels=channels, rate=sr, output=True)
     futures = []
+    phase = np.angle(stft[..., 0])
+
+    padding = [(0, 0) for _ in stft.shape]
+    padding[-1] = (0, 2)
+    stft2 = np.pad(stft, padding, "constant")
+    remain = []
 
     for it in range(MAX_ITER):
         steps = []
@@ -53,23 +108,46 @@ def speed_modify(filename, formula):
         while True:
             x = t / stft.shape[-1]
             v = stft.shape[-1] * eval(formula)
-            if v > stft.shape[-1] or v < 0 or t >= (it+1) * chunk_size:
+            if v > stft.shape[-1] or v < 0:
+                steps.append(None)
+                break
+            elif t >= (it+1) * chunk_size:
+                steps.append(min(v, stft.shape[-1]-1))
                 break
             else:
                 steps.append(min(v, stft.shape[-1]-1))
             t += 1
-        if len(steps) == 0:
+        if len(steps) == 1:
             break
 
-        futures.append(pool.apply_async(process, (stft, steps, it, waveform.dtype)))
+        shape = list(stft.shape)
+        shape[-1] = len(steps)
+        stft_stretch = np.zeros_like(stft, shape=shape)
+    
+        for t, step in enumerate(steps):
+            if step == None:
+                stft_stretch[..., t] = 0
+            else:
+                left = stft2[..., int(step)]
+                right = stft2[..., int(step)+1]
+                frac = np.mod(step, 1.0)
+                mag = (1 - frac) * np.abs(left) + frac * np.abs(right)
+                stft_stretch[..., t] = (np.cos(phase) + 1j * np.sin(phase)) * mag
+                phase += np.angle(right) - np.angle(left)
+
+        result, expected_len = istft(stft_stretch, remain)
+        stft_stretch, remain = result[..., :expected_len], result[..., expected_len:]
+        futures.append(pool.apply_async(process, (stft_stretch, it)))
         
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paFloat32, channels=channels, rate=sr, output=True)
     start = 0
     for i in range(len(futures)):
         l = futures[i].get()
-        stream.write(dst[start:start+l].tobytes())
+        if mode == "play":
+            stream.write(dst[start:start+l].tobytes())
         start += l
+    if mode == "save":
+        reshaped = dst[:start].reshape((start//2, 2))
+        soundfile.write('audio.wav', reshaped, sr)
 
     pool.close()
     pool.join()
@@ -82,8 +160,8 @@ def speed_modify(filename, formula):
 if __name__ == '__main__':
 
     filename = "psy.wav"
-    # formula = "1 - 4*x**2 - 2e-1*x"
+    formula = "1 - 4*x**2 - 2e-1*x"
     # formula = "1 + 3.5*x**2 - 3.8*x"
-    formula = "1 - 2*x"
+    # formula = "1 - 3*x"
 
-    speed_modify(filename, formula)
+    speed_modify(filename, formula, "save")
