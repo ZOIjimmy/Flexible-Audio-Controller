@@ -12,15 +12,14 @@ chunk_size = 128
 
 def __overlap_add(y, ytmp, hop_length):
     n_fft = ytmp.shape[-2]
-    N = n_fft
     for frame in range(ytmp.shape[-1]):
         sample = frame * hop_length
         # if N > y.shape[-1] - sample:
             # N = y.shape[-1] - sample
-        y[..., sample : (sample + N)] += ytmp[..., :N, frame]
+        y[..., sample : (sample + n_fft)] += ytmp[..., :n_fft, frame]
 
-# edited from librosa istft
-def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_length = None, n_fft = None, window = "hann") -> np.ndarray:
+# modified from librosa istft
+def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_length = None, n_fft = None, window = "hann", last = False) -> np.ndarray:
     if n_fft is None:
         n_fft = 2 * (stft_matrix.shape[-2] - 1)
     if win_length is None:
@@ -38,12 +37,12 @@ def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_le
     shape = list(stft_matrix.shape[:-2])
     expected_signal_len = n_fft + hop_length * (n_frames - 1)
     shape.append(expected_signal_len)
-    expected_signal_len -= 2 * (n_fft // 2)
+    expected_signal_len -= n_fft
 
     y = np.zeros(shape, dtype=dtype)
     fft = librosa.get_fftlib()
     start_frame = int(np.ceil((n_fft // 2) / hop_length))
-    ytmp = ifft_window * fft.irfft(stft_matrix[..., :start_frame], n=n_fft, axis=-2)
+    ytmp = ifft_window * fft.irfft(stft_matrix[..., :start_frame], n=n_fft, axis=-2) # TODO !!! independent for each frame
 
     shape[-1] = n_fft + hop_length * (start_frame - 1)
     head_buffer = np.zeros(shape, dtype=dtype)
@@ -55,9 +54,9 @@ def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_le
     if y.shape[-1] < shape[-1] - n_fft // 2:
         y[..., :] = head_buffer[..., n_fft // 2 : y.shape[-1] + n_fft // 2]
     else:
-        y[..., : shape[-1] - n_fft // 2] = head_buffer[..., n_fft // 2 :]
+        y[..., : shape[-1]] = head_buffer[:,:]
 
-    offset = start_frame * hop_length - n_fft // 2
+    offset = start_frame * hop_length
     n_columns = int(librosa.util.MAX_MEM_BLOCK // (np.prod(stft_matrix.shape[:-1]) * stft_matrix.itemsize))
     n_columns = max(n_columns, 1)
 
@@ -68,11 +67,21 @@ def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_le
         __overlap_add(y[..., frame * hop_length + offset :], ytmp, hop_length)
         frame += bl_t - bl_s
 
-    ifft_window_sum = librosa.filters.window_sumsquare(window=window,n_frames=n_frames,win_length=win_length,n_fft=n_fft,hop_length=hop_length,dtype=dtype)
-    start = n_fft // 2
-    ifft_window_sum = librosa.util.fix_length(ifft_window_sum[..., start:], size=y.shape[-1])
-    approx_nonzero_indices = ifft_window_sum > librosa.util.tiny(ifft_window_sum)
-    y[..., approx_nonzero_indices] /= ifft_window_sum[approx_nonzero_indices]
+    # normalize
+    if len(remain) > 0:
+        ifft_win_sum = librosa.filters.window_sumsquare(window=window,n_frames=n_frames+4,win_length=win_length,n_fft=n_fft,hop_length=hop_length,dtype=dtype)[n_fft:]
+        start = 0
+    else:
+        ifft_win_sum = librosa.filters.window_sumsquare(window=window,n_frames=n_frames,win_length=win_length,n_fft=n_fft,hop_length=hop_length,dtype=dtype)
+        start = n_fft // 2
+
+    ifft_win_sum = librosa.util.fix_length(ifft_win_sum[..., start:], size=y.shape[-1])
+    approx_nonzero_indices = ifft_win_sum > librosa.util.tiny(ifft_win_sum)
+    if last:
+        expected_signal_len += n_fft
+    else:
+        approx_nonzero_indices[expected_signal_len:] = False
+    y[..., approx_nonzero_indices] /= ifft_win_sum[approx_nonzero_indices]
 
     return y, expected_signal_len
 
@@ -164,4 +173,4 @@ if __name__ == '__main__':
     # formula = "1 + 3.5*x**2 - 3.8*x"
     # formula = "1 - 3*x"
 
-    speed_modify(filename, formula, "save")
+    speed_modify(filename, formula, "play")
