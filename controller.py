@@ -1,6 +1,7 @@
 import numpy as np
 import librosa
 import pyaudio
+import soundfile
 
 ARRAY_SIZE = int(1e10)
 
@@ -36,16 +37,18 @@ def speed_modify(filename, formula):
         stft_stretch[..., t] = (np.cos(phase) + 1j * np.sin(phase)) * mag
         phase += np.angle(right) - np.angle(left)
 
-    y_stretch = librosa.istft(stft_stretch, dtype=waveform.dtype)
-    y_stretch = y_stretch.reshape(-1, 1, order='F').ravel()
+    y_stretch = librosa.istft(stft_stretch, dtype=waveform.dtype).transpose()
+    # y_stretch = y_stretch.reshape(-1, 1, order='F').ravel()
     
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paFloat32, channels=channels, rate=sr, output=True)
-    stream.write(y_stretch.tobytes())
+    # p = pyaudio.PyAudio()
+    # stream = p.open(format=pyaudio.paFloat32, channels=channels, rate=sr, output=True)
+    # stream.write(y_stretch.tobytes())
 
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
+    # stream.stop_stream()
+    # stream.close()
+    # p.terminate()
+
+    soundfile.write('good.wav', y_stretch, sr)
 
 if __name__ == '__main__':
 

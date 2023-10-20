@@ -1,14 +1,11 @@
-import multiprocessing.managers
-import multiprocessing
 import numpy as np
 import librosa
 import pyaudio
 import soundfile
 
 ARRAY_SIZE = int(1e10)
-MAX_ITER = 1000
-MAX_PROCESSOR = 4
-chunk_size = 128
+MAX_ITER = 10000
+chunk_size = 8     # 0.1 second in sample rate 44100
 
 def __overlap_add(y, ytmp, hop_length):
     n_fft = ytmp.shape[-2]
@@ -42,7 +39,7 @@ def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_le
     y = np.zeros(shape, dtype=dtype)
     fft = librosa.get_fftlib()
     start_frame = int(np.ceil((n_fft // 2) / hop_length))
-    ytmp = ifft_window * fft.irfft(stft_matrix[..., :start_frame], n=n_fft, axis=-2) # TODO !!! independent for each frame
+    ytmp = ifft_window * fft.irfft(stft_matrix[..., :start_frame], n=n_fft, axis=-2)
 
     shape[-1] = n_fft + hop_length * (start_frame - 1)
     head_buffer = np.zeros(shape, dtype=dtype)
@@ -85,22 +82,11 @@ def istft(stft_matrix: np.ndarray, remain: np.ndarray, hop_length = None, win_le
 
     return y, expected_signal_len
 
-def process(stft_stretch, i):
-    y_stretch = stft_stretch.reshape(-1, 1, order='F').ravel()
-    shm = multiprocessing.shared_memory.SharedMemory(name="buffer")
-    dst = np.ndarray(shape=(ARRAY_SIZE,), dtype=np.float32, buffer=shm.buf)
-    dst[i*chunk_size*1024:i*chunk_size*1024+y_stretch.shape[0]] = y_stretch[:]
-    return y_stretch.shape[0]
-
 def speed_modify(filename, formula="x", mode="play"):
     waveform, sr = librosa.load(filename, sr=None, mono=False)
     stft = librosa.stft(waveform)
     channels, _, stft_len = stft.shape
 
-    d_size = np.dtype(np.float32).itemsize * np.prod((ARRAY_SIZE,))
-    shm = multiprocessing.shared_memory.SharedMemory(create=True, size=d_size, name="buffer")
-    dst = np.ndarray((ARRAY_SIZE,), dtype=np.float32, buffer=shm.buf)
-    pool = multiprocessing.Pool(processes=MAX_PROCESSOR)
     p = pyaudio.PyAudio()
     stream = p.open(format=pyaudio.paFloat32, channels=channels, rate=sr, output=True)
     futures = []
@@ -110,6 +96,8 @@ def speed_modify(filename, formula="x", mode="play"):
     padding[-1] = (0, 2)
     stft2 = np.pad(stft, padding, "constant")
     remain = []
+    start = 0
+    full = np.zeros(shape=(ARRAY_SIZE, 2), dtype=np.float32)
 
     for it in range(MAX_ITER):
         steps = []
@@ -146,22 +134,17 @@ def speed_modify(filename, formula="x", mode="play"):
 
         result, expected_len = istft(stft_stretch, remain)
         stft_stretch, remain = result[..., :expected_len], result[..., expected_len:]
-        futures.append(pool.apply_async(process, (stft_stretch, it)))
-        
-    start = 0
-    for i in range(len(futures)):
-        l = futures[i].get()
-        if mode == "play":
-            stream.write(dst[start:start+l].tobytes())
-        start += l
-    if mode == "save":
-        reshaped = dst[:start].reshape((start//2, 2))
-        soundfile.write('audio.wav', reshaped, sr)
+        y_stretch = stft_stretch.transpose()
 
-    pool.close()
-    pool.join()
-    shm.close()
-    shm.unlink()
+        if mode == "play":
+            stream.write(y_stretch.tobytes())
+        elif mode == "save":
+            full[start:start+y_stretch.shape[0], ...] = y_stretch
+        start += y_stretch.shape[0]
+
+    if mode == "save":
+        soundfile.write('audio2.wav', full[:start], sr)
+
     stream.stop_stream()
     stream.close()
     p.terminate()
