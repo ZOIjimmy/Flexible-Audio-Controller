@@ -7,7 +7,7 @@ import threading
 
 ARRAY_SIZE = int(1e10)
 MAX_ITER = 10000
-chunk_size = 128 # about 0.1 second in sample rate 44100
+chunk_size = 8 # about 0.1 second in sample rate 44100
 
 def key_callback(e):
     kb = keyboard._pressed_events
@@ -23,20 +23,21 @@ def key_callback(e):
 class AudioSpeedController:
     def __init__(self):
         self.stft = np.array([])
-        self.stft2 = np.array([])
         self.phase = np.array([])
-        self.y_stretch = np.array([])
+        self.y = np.array([])
         self.remain = []
+        self.formula = None
+        self.speed = 1
+        self.accel = 0
+        self.x = 0
 
     def play(self, stream, i):
-        stream.write(self.y_stretch.tobytes())
+        stream.write(self.y.tobytes())
 
     def __overlap_add(self, y, ytmp, hop_length):
         n_fft = ytmp.shape[-2]
         for frame in range(ytmp.shape[-1]):
             sample = frame * hop_length
-            # if N > y.shape[-1] - sample:
-                # N = y.shape[-1] - sample
             y[..., sample : (sample + n_fft)] += ytmp[..., :n_fft, frame]
 
     # modified from librosa istft
@@ -105,63 +106,82 @@ class AudioSpeedController:
 
         self.remain = y[..., expected_signal_len:]
         y[..., approx_nonzero_indices] /= ifft_win_sum[approx_nonzero_indices]
-        self.y_stretch = y[..., :expected_signal_len].transpose()
+        self.y = y[..., :expected_signal_len].transpose()
 
     def calculate(self, it):
         steps = []
         t = it * chunk_size
-        while True:
-            x = t / self.stft.shape[-1]
-            v = self.stft.shape[-1] * eval(formula)
-            if v > self.stft.shape[-1] or v < 0:
-                steps.append(None)
-                break
-            elif t >= (it+1) * chunk_size:
-                steps.append(min(v, self.stft.shape[-1]-1))
-                break
-            else:
-                steps.append(min(v, self.stft.shape[-1]-1))
-            t += 1
-        if len(steps) == 1:
-            return []
+        if self.formula:
+            while True:
+                x = t / self.shape[-1]
+                v = self.shape[-1] * eval(self.formula)
+                if v > self.shape[-1] or v < 0:
+                    steps.append(None)
+                    break
+                else:
+                    steps.append(min(v, self.shape[-1]-1))
+                if t >= (it+1) * chunk_size:
+                    break
+                t += 1
+        else:
+            while True:
+                self.x += self.speed
+                self.speed += self.accel/self.shape[-1]
+                if self.x > self.shape[-1] or self.x < 0:
+                    steps.append(None)
+                    break
+                else:
+                    steps.append(min(self.x, self.shape[-1]-1))
+                if t >= (it+1) * chunk_size:
+                    break
+                t += 1
 
-        shape = list(self.stft.shape)
+        if len(steps) == 1:
+            self.y = np.array([])
+            return
+
+        shape = list(self.shape)
         shape[-1] = len(steps)
-        stft_stretch = np.zeros_like(self.stft, shape=shape)
+        stretch = np.zeros(shape, dtype=np.complex64)
     
         for t, step in enumerate(steps):
             if step == None:
-                stft_stretch[..., t] = 0
+                stretch[..., t] = 0
             else:
-                left = self.stft2[..., int(step)]
-                right = self.stft2[..., int(step)+1]
+                left = self.stft[..., int(step)]
+                right = self.stft[..., int(step)+1]
                 frac = np.mod(step, 1.0)
                 mag = (1 - frac) * np.abs(left) + frac * np.abs(right)
-                stft_stretch[..., t] = (np.cos(self.phase) + 1j * np.sin(self.phase)) * mag
+                stretch[..., t] = (np.cos(self.phase) + 1j * np.sin(self.phase)) * mag
                 self.phase += np.angle(right) - np.angle(left)
 
-        self.istft(stft_stretch)
+        self.istft(stretch)
 
-    def speed_modify(self, filename, formula="x", mode="play"):
+    def speed_modify(self, filename, formula=None, mode="play", param=(1,0,False)):
         waveform, sr = librosa.load(filename, sr=None, mono=False)
         self.stft = librosa.stft(waveform)
-        channels, _, stft_len = self.stft.shape
+        self.shape = self.stft.shape
+        self.phase = np.angle(self.stft[..., 0])
+        self.formula = formula
+        self.speed, self.accel, reverse = param
+        if reverse:
+            self.x = self.shape[-1]
+        else:
+            self.x = 0
 
         p = pyaudio.PyAudio()
-        stream = p.open(format=pyaudio.paFloat32, channels=channels, rate=sr, output=True)
-        futures = []
-        self.phase = np.angle(self.stft[..., 0])
+        stream = p.open(format=pyaudio.paFloat32, channels=self.shape[0], rate=sr, output=True)
 
-        padding = [(0, 0) for _ in self.stft.shape]
+        padding = [(0, 0) for _ in self.shape]
         padding[-1] = (0, 2)
-        self.stft2 = np.pad(self.stft, padding, "constant")
+        self.stft = np.pad(self.stft, padding, "constant")
+
         start = 0
         full = np.zeros(shape=(ARRAY_SIZE, 2), dtype=np.float32)
 
         for it in range(MAX_ITER):
             self.calculate(it)
-
-            if len(self.y_stretch) == 0:
+            if len(self.y) == 0:
                 break
 
             if mode == "play":
@@ -170,8 +190,8 @@ class AudioSpeedController:
                 thrd = threading.Thread(target=self.play, args=(stream, 0))
                 thrd.start()
             elif mode == "save":
-                full[start:start+self.y_stretch.shape[0], ...] = self.y_stretch
-            start += self.y_stretch.shape[0]
+                full[start:start+self.y.shape[0], ...] = self.y
+            start += self.y.shape[0]
 
         if mode == "save":
             soundfile.write('audio2.wav', full[:start], sr)
@@ -191,4 +211,5 @@ if __name__ == '__main__':
     keyboard.hook(key_callback)
 
     controller = AudioSpeedController()
-    controller.speed_modify(filename, formula, "play")
+    # controller.speed_modify(filename, formula=formula, mode="play")
+    controller.speed_modify(filename, mode="play", param=(-0.2, -8, True))
