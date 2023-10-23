@@ -9,16 +9,6 @@ ARRAY_SIZE = int(1e10)
 MAX_ITER = 10000
 chunk_size = 8 # about 0.1 second in sample rate 44100
 
-def key_callback(e):
-    kb = keyboard._pressed_events
-    if 123 in kb:
-        print("left")
-    if 124 in kb:
-        print("right")
-    if 125 in kb:
-        print("down")
-    if 126 in kb:
-        print("up")
 
 class AudioSpeedController:
     def __init__(self):
@@ -30,6 +20,17 @@ class AudioSpeedController:
         self.speed = 1
         self.accel = 0
         self.x = 0
+
+    def key_callback(self, e):
+        kb = keyboard._pressed_events
+        if 123 in kb:
+            self.speed -= 0.1
+        if 124 in kb:
+            self.speed += 0.1
+        if 125 in kb:
+            self.accel -= 0.1
+        if 126 in kb:
+            self.accel += 0.1
 
     def play(self, stream, i):
         stream.write(self.y.tobytes())
@@ -180,6 +181,7 @@ class AudioSpeedController:
         full = np.zeros(shape=(ARRAY_SIZE, 2), dtype=np.float32)
 
         for it in range(MAX_ITER):
+            print('\rspeed: {:.5f}, accel: {:.5f}'.format(self.speed, self.accel), end="")
             self.calculate(it)
             if len(self.y) == 0:
                 break
@@ -208,8 +210,8 @@ if __name__ == '__main__':
     formula = "1 - 4*x**2 - 2e-1*x"
     # formula = "1 + 3.5*x**2 - 3.8*x"
     # formula = "1 - 3*x"
-    keyboard.hook(key_callback)
 
     controller = AudioSpeedController()
+    keyboard.hook(controller.key_callback)
     # controller.speed_modify(filename, formula=formula, mode="play")
     controller.speed_modify(filename, mode="play", param=(-0.2, -8, True))
