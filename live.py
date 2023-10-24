@@ -4,11 +4,13 @@ import pyaudio
 import soundfile
 import keyboard
 import threading
+import numexpr as ne
 
 ARRAY_SIZE = int(1e10)
 MAX_ITER = 10000
 chunk_size = 8 # about 0.1 second in sample rate 44100
 
+# TODO: volume, channels, echo, eq
 
 class AudioSpeedController:
     def __init__(self):
@@ -115,7 +117,7 @@ class AudioSpeedController:
         if self.formula:
             while True:
                 x = t / self.shape[-1]
-                v = self.shape[-1] * eval(self.formula)
+                v = self.shape[-1] * ne.evaluate(self.formula)
                 if v > self.shape[-1] or v < 0:
                     steps.append(None)
                     break
@@ -125,6 +127,7 @@ class AudioSpeedController:
                     break
                 t += 1
         else:
+            print('\rspeed: {:.5f}, accel: {:.5f}'.format(self.speed, self.accel), end="")
             while True:
                 self.x += self.speed
                 self.speed += self.accel/self.shape[-1]
@@ -181,7 +184,6 @@ class AudioSpeedController:
         full = np.zeros(shape=(ARRAY_SIZE, 2), dtype=np.float32)
 
         for it in range(MAX_ITER):
-            print('\rspeed: {:.5f}, accel: {:.5f}'.format(self.speed, self.accel), end="")
             self.calculate(it)
             if len(self.y) == 0:
                 break
@@ -213,5 +215,5 @@ if __name__ == '__main__':
 
     controller = AudioSpeedController()
     keyboard.hook(controller.key_callback)
-    # controller.speed_modify(filename, formula=formula, mode="play")
-    controller.speed_modify(filename, mode="play", param=(-0.2, -8, True))
+    controller.speed_modify(filename, formula=formula, mode="play")
+    # controller.speed_modify(filename, mode="play", param=(-0.2, -8, True))
