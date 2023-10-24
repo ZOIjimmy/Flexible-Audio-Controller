@@ -18,21 +18,31 @@ class AudioSpeedController:
         self.phase = np.array([])
         self.y = np.array([])
         self.remain = []
-        self.formula = None
+        self.speed_formula = None
         self.speed = 1
         self.accel = 0
+        self.volume_formula = None
+        self.volume = 1
         self.x = 0
 
     def key_callback(self, e):
         kb = keyboard._pressed_events
-        if 123 in kb:
+        if 0 in kb: # a
             self.speed -= 0.1
-        if 124 in kb:
+        if 1 in kb: # s
             self.speed += 0.1
-        if 125 in kb:
+        if 2 in kb: # d
             self.accel -= 0.1
-        if 126 in kb:
+        if 13 in kb: # w
             self.accel += 0.1
+        if 123 in kb: # left
+            pass
+        if 124 in kb: # right
+            pass
+        if 125 in kb: # down
+            self.volume -= 0.1
+        if 126 in kb: # up
+            self.volume += 0.1
 
     def play(self, stream, i):
         stream.write(self.y.tobytes())
@@ -114,31 +124,22 @@ class AudioSpeedController:
     def calculate(self, it):
         steps = []
         t = it * chunk_size
-        if self.formula:
-            while True:
-                x = t / self.shape[-1]
-                v = self.shape[-1] * ne.evaluate(self.formula)
-                if v > self.shape[-1] or v < 0:
-                    steps.append(None)
-                    break
-                else:
-                    steps.append(min(v, self.shape[-1]-1))
-                if t >= (it+1) * chunk_size:
-                    break
-                t += 1
-        else:
-            print('\rspeed: {:.5f}, accel: {:.5f}'.format(self.speed, self.accel), end="")
-            while True:
+        while True:
+            x = t / self.shape[-1]
+            if self.speed_formula:
+                self.x = self.shape[-1] * ne.evaluate(self.speed_formula)
+            else:
+                # print('\rspeed: {:.5f}, accel: {:.5f}'.format(self.speed, self.accel), end="")
                 self.x += self.speed
                 self.speed += self.accel/self.shape[-1]
-                if self.x > self.shape[-1] or self.x < 0:
-                    steps.append(None)
-                    break
-                else:
-                    steps.append(min(self.x, self.shape[-1]-1))
-                if t >= (it+1) * chunk_size:
-                    break
-                t += 1
+            if self.x > self.shape[-1] or self.x < 0:
+                steps.append(None)
+                break
+            else:
+                steps.append(min(self.x, self.shape[-1]-1))
+            if t >= (it+1) * chunk_size:
+                break
+            t += 1
 
         if len(steps) == 1:
             self.y = np.array([])
@@ -156,22 +157,39 @@ class AudioSpeedController:
                 right = self.stft[..., int(step)+1]
                 frac = np.mod(step, 1.0)
                 mag = (1 - frac) * np.abs(left) + frac * np.abs(right)
+                if self.volume_formula:
+                    print('volume: {:.1f}'.format(self.volume), end="")
+                    x = step/self.shape[-1]
+                    mag2 = ne.evaluate(self.volume_formula)
+                    mag *= max(mag2, 0)
+                else:
+                    mag *= max(self.volume, 0)
                 stretch[..., t] = (np.cos(self.phase) + 1j * np.sin(self.phase)) * mag
                 self.phase += np.angle(right) - np.angle(left)
 
         self.istft(stretch)
 
-    def speed_modify(self, filename, formula=None, mode="play", param=(1,0,False)):
+    def speed_modify(self, filename, speed=(1,0,False), volume=1, mode="play"):
         waveform, sr = librosa.load(filename, sr=None, mono=False)
         self.stft = librosa.stft(waveform)
         self.shape = self.stft.shape
         self.phase = np.angle(self.stft[..., 0])
-        self.formula = formula
-        self.speed, self.accel, reverse = param
-        if reverse:
-            self.x = self.shape[-1]
+        if type(speed) is str:
+            self.speed_formula = speed
+        elif type(speed) is tuple and len(speed) == 3:
+            self.speed, self.accel, reverse = speed
+            if reverse:
+                self.x = self.shape[-1]
+            else:
+                self.x = 0
         else:
-            self.x = 0
+            raise TypeError("invalid speed param")
+        if type(volume) is str:
+            self.volume_formula = volume
+        elif type(volume) is int or type(volume) is float:
+            self.volume = volume
+        else:
+            raise TypeError("invalid volume param")
 
         p = pyaudio.PyAudio()
         stream = p.open(format=pyaudio.paFloat32, channels=self.shape[0], rate=sr, output=True)
@@ -209,11 +227,11 @@ class AudioSpeedController:
 if __name__ == '__main__':
 
     filename = "psy.wav"
-    formula = "1 - 4*x**2 - 2e-1*x"
+    # formula = "1 - 4*x**2 - 2e-1*x"
     # formula = "1 + 3.5*x**2 - 3.8*x"
-    # formula = "1 - 3*x"
+    formula = "1 - 3*x"
 
     controller = AudioSpeedController()
     keyboard.hook(controller.key_callback)
-    controller.speed_modify(filename, formula=formula, mode="play")
-    # controller.speed_modify(filename, mode="play", param=(-0.2, -8, True))
+    # controller.speed_modify(filename, speed=formula, volume="x", mode="play")
+    controller.speed_modify(filename, speed=(-0.2, -8, True), mode="play")
