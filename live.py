@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import numpy as np
 import librosa
 import pyaudio
@@ -5,12 +6,13 @@ import soundfile
 import keyboard
 import threading
 import numexpr as ne
+import argparse
 
 ARRAY_SIZE = int(1e10)
 MAX_ITER = 10000
 chunk_size = 8 # about 0.1 second in sample rate 44100
 
-# TODO: volume, channels, echo, eq
+# TODO: channels, echo, eq
 
 class AudioSpeedController:
     def __init__(self):
@@ -225,13 +227,32 @@ class AudioSpeedController:
         p.terminate()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+                    prog='live.py',
+                    description='play or save the modified music',
+                    epilog='')
+    parser.add_argument('filename')
+    parser.add_argument('-s', '--speed', help="either a formula with variable x or a list of three numbers seperated with comma representing initial speed,acceleration,reverse")
+    parser.add_argument('-m', '--mode', help="'play' or 'save'")
+    args = parser.parse_args()
+    # if len(sys.argv) <= 1:
+        # raise ValueError('Usage: ./live.py filename -f [')
+    # if sys.argv[1] == '-h' or sys.argv[1] == '--help':
+        # print(
+        # exit()
 
-    filename = "psy.wav"
-    # formula = "1 - 4*x**2 - 2e-1*x"
+    filename = args.filename
+    speed = args.speed if args.speed else "1 - 4*x**2 - 2e-1*x"
+    if ',' in speed:
+        speed = speed.split(',')
+    mode = args.mode if args.mode else 'play'
     # formula = "1 + 3.5*x**2 - 3.8*x"
-    formula = "1 - 3*x"
+    # formula = "1 - 3*x"
+    # speed = (-0.2, -8, True) 
+
+    # print(filename, speed, mode)
 
     controller = AudioSpeedController()
     keyboard.hook(controller.key_callback)
     # controller.speed_modify(filename, speed=formula, volume="x", mode="play")
-    controller.speed_modify(filename, speed=(-0.2, -8, True), mode="play")
+    controller.speed_modify(filename, speed=speed, mode=mode)
