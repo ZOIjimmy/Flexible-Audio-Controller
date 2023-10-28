@@ -160,7 +160,7 @@ class AudioSpeedController:
                 frac = np.mod(step, 1.0)
                 mag = (1 - frac) * np.abs(left) + frac * np.abs(right)
                 if self.volume_formula:
-                    print('volume: {:.1f}'.format(self.volume), end="")
+                    # print('volume: {:.1f}'.format(self.volume), end="")
                     x = step/self.shape[-1]
                     mag2 = ne.evaluate(self.volume_formula)
                     mag *= max(mag2, 0)
@@ -232,27 +232,22 @@ if __name__ == '__main__':
                     description='play or save the modified music',
                     epilog='')
     parser.add_argument('filename')
-    parser.add_argument('-s', '--speed', help="either a formula with variable x or a list of three numbers seperated with comma representing initial speed,acceleration,reverse")
-    parser.add_argument('-m', '--mode', help="'play' or 'save'")
+    parser.add_argument('-s', '--speed', help="A formula with variable x like '1-3*x'. Overwrite other speed arguments.")
+    parser.add_argument('-i', '--initial_velocity', default=-0.2)
+    parser.add_argument('-a', '--initial_acceleration', default=-8)
+    parser.add_argument('-r', '--reversed', default=True)
+    parser.add_argument('-v', '--volume', help="A formula with variable x like 'x**10'. Constant is accepted.", default=1)
+    parser.add_argument('-m', '--mode', help="'play' or 'save'", default='play')
     args = parser.parse_args()
-    # if len(sys.argv) <= 1:
-        # raise ValueError('Usage: ./live.py filename -f [')
-    # if sys.argv[1] == '-h' or sys.argv[1] == '--help':
-        # print(
-        # exit()
+    if not args.speed:
+        args.speed = (args.initial_velocity, args.initial_acceleration, args.reversed)
 
-    filename = args.filename
-    speed = args.speed if args.speed else "1 - 4*x**2 - 2e-1*x"
-    if ',' in speed:
-        speed = speed.split(',')
-    mode = args.mode if args.mode else 'play'
+    # formula = "1 - 4*x**2 - 2e-1*x"
     # formula = "1 + 3.5*x**2 - 3.8*x"
     # formula = "1 - 3*x"
     # speed = (-0.2, -8, True) 
 
-    # print(filename, speed, mode)
-
     controller = AudioSpeedController()
     keyboard.hook(controller.key_callback)
     # controller.speed_modify(filename, speed=formula, volume="x", mode="play")
-    controller.speed_modify(filename, speed=speed, mode=mode)
+    controller.speed_modify(args.filename, speed=args.speed, volume=args.volume, mode=args.mode)
